@@ -271,7 +271,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
 name = "cli"
-version = "0.2.9-alpha.1"
+version = "0.2.10-alpha.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1063,7 +1063,7 @@ dependencies = [
 
 [[package]]
 name = "kumo-core"
-version = "0.2.9-alpha.1"
+version = "0.2.10-alpha.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "resolver"
-version = "0.2.9-alpha.1"
+version = "0.2.10-alpha.3"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1622,7 +1622,7 @@ dependencies = [
 
 [[package]]
 name = "security"
-version = "0.2.9-alpha.1"
+version = "0.2.10-alpha.3"
 dependencies = [
  "anyhow",
  "chrono",

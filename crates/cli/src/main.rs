@@ -69,9 +69,9 @@ enum Commands {
     },
     #[command(alias = "up")]
     Upgrade {
-        /// Specific packages to upgrade (empty = all)
+        /// Specific packages to upgrade (empty = all) or upgrade type (major, minor, patch/parch)
         packages: Vec<String>,
-        /// Upgrade to the absolute latest version, ignoring semver ranges
+        /// Upgrade to the absolute latest version, ignoring semver ranges (now default)
         #[arg(short = 'L', long)]
         latest: bool,
         /// Only upgrade dependencies (skip devDependencies)
@@ -80,6 +80,9 @@ enum Commands {
         /// Only upgrade devDependencies (skip dependencies)
         #[arg(long)]
         dev: bool,
+        /// Save upgraded versions as fixed (without ^ prefix)
+        #[arg(short = 'F', long)]
+        fixed: bool,
         /// Show available updates without applying them
         #[arg(short = 'n', long)]
         dry_run: bool,
@@ -183,9 +186,9 @@ async fn main() -> Result<()> {
             commands::sandbox::execute(script).await?;
         }
         Commands::Update { pre, version } => commands::update::execute(pre, version).await?,
-        Commands::Upgrade { packages, latest, prod, dev, dry_run, log } => {
+        Commands::Upgrade { packages, latest, prod, dev, fixed, dry_run, log } => {
             let config_path = config_path.ok_or_else(|| anyhow::anyhow!("Neither kumo.json nor package.json found in current directory"))?;
-            commands::upgrade::execute(&store, &resolver, &security, packages, latest, prod, dev, dry_run, log, config_path).await?;
+            commands::upgrade::execute(&store, &resolver, &security, packages, latest, prod, dev, fixed, dry_run, log, config_path).await?;
         }
         Commands::Config { subcommand } => {
             commands::config::execute(subcommand).await?;

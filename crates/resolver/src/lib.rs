@@ -163,6 +163,39 @@ impl Resolver {
             .ok_or_else(|| anyhow!("No latest tag found for {}", name))
     }
 
+    /// Gets all available versions of a package from the registry metadata cache or registry.
+    pub async fn get_available_versions(&self, name: &str) -> Result<Vec<Version>> {
+        let cache_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".kumo")
+            .join("cache")
+            .join("metadata");
+        let cache_path = cache_dir.join(format!("{}.json", name.replace('/', "__")));
+
+        let response: RegistryResponse = if cache_path.exists() {
+            let content = std::fs::read_to_string(&cache_path)?;
+            if let Ok(res) = serde_json::from_str::<RegistryResponse>(&content) {
+                if res.versions.is_empty() {
+                    self.fetch_and_cache_metadata(name, &cache_path).await?
+                } else {
+                    res
+                }
+            } else {
+                self.fetch_and_cache_metadata(name, &cache_path).await?
+            }
+        } else {
+            self.fetch_and_cache_metadata(name, &cache_path).await?
+        };
+
+        let mut versions: Vec<Version> = response
+            .versions
+            .keys()
+            .filter_map(|v| Version::parse(v).ok())
+            .collect();
+        versions.sort();
+        Ok(versions)
+    }
+
     async fn resolve_package_internal(&self, name: &str, range: &str) -> Result<PackageMetadata> {
         let cache_dir = dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))

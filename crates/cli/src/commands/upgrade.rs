@@ -13,7 +13,7 @@ struct UpgradeCandidate {
     dep_section: DepSection,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ChangeType {
     Major,
     Minor,
@@ -52,9 +52,10 @@ pub async fn execute(
     resolver: &Resolver,
     security: &SecurityEngine,
     packages: Vec<String>,
-    latest: bool,
+    _latest: bool,
     prod_only: bool,
     dev_only: bool,
+    fixed: bool,
     dry_run: bool,
     log: bool,
     config_path: std::path::PathBuf,
@@ -62,6 +63,24 @@ pub async fn execute(
     // Read the configuration file
     let config_content: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
+
+    // Parse packages list to extract upgrade filter vs package names
+    let mut upgrade_type = None;
+    let mut target_packages = Vec::new();
+
+    for pkg in packages {
+        let pkg_lower = pkg.to_lowercase();
+        if pkg_lower == "major" || pkg_lower == "minor" || pkg_lower == "patch" || pkg_lower == "parch" {
+            upgrade_type = Some(match pkg_lower.as_str() {
+                "major" => ChangeType::Major,
+                "minor" => ChangeType::Minor,
+                "patch" | "parch" => ChangeType::Patch,
+                _ => unreachable!(),
+            });
+        } else {
+            target_packages.push(pkg);
+        }
+    }
 
     // Collect dependencies to check based on --prod / --dev flags
     let mut deps_to_check: Vec<(String, String, DepSection)> = Vec::new();
@@ -99,8 +118,8 @@ pub async fn execute(
     }
 
     // Filter to specific packages if provided
-    if !packages.is_empty() {
-        deps_to_check.retain(|(name, _, _)| packages.contains(name));
+    if !target_packages.is_empty() {
+        deps_to_check.retain(|(name, _, _)| target_packages.contains(name));
         if deps_to_check.is_empty() {
             println!("None of the specified packages were found in dependencies.");
             return Ok(());
@@ -117,7 +136,7 @@ pub async fn execute(
         HashMap::new()
     };
 
-    // Resolve latest available versions for each dependency
+    // Resolve target available versions for each dependency
     println!("Checking for updates...\n");
 
     let pb = indicatif::ProgressBar::new(deps_to_check.len() as u64);
@@ -140,27 +159,92 @@ pub async fn execute(
             .cloned()
             .unwrap_or_else(|| range.clone());
 
+        let cur_version_opt = {
+            let cleaned = current_version.trim_start_matches(|c: char| !c.is_ascii_digit());
+            semver::Version::parse(cleaned).ok()
+        };
+
         // Resolve the package metadata for the target upgrade version
-        let meta = if latest {
-            match resolver.resolve_package_fresh(name, "latest").await {
-                Ok(m) => m,
-                Err(e) => {
-                    if log {
-                        eprintln!("  Warning: Could not resolve latest version for {}: {}", name, e);
+        let meta = match upgrade_type {
+            Some(ChangeType::Patch) | Some(ChangeType::Minor) => {
+                if let Some(cur) = &cur_version_opt {
+                    match resolver.get_available_versions(name).await {
+                        Ok(versions) => {
+                            let target_ver = versions.into_iter().filter(|v| {
+                                match upgrade_type {
+                                    Some(ChangeType::Patch) => {
+                                        v.major == cur.major && v.minor == cur.minor && v > cur
+                                    }
+                                    Some(ChangeType::Minor) => {
+                                        v.major == cur.major && v > cur
+                                    }
+                                    _ => false,
+                                }
+                            }).max();
+
+                            if let Some(target) = target_ver {
+                                match resolver.resolve_package_fresh(name, &target.to_string()).await {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        if log {
+                                            eprintln!("  Warning: Could not resolve version {} for {}: {}", target, name, e);
+                                        }
+                                        pb.inc(1);
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                // No newer version matching the filter was found, treat as already up-to-date
+                                match resolver.resolve_package_fresh(name, &current_version).await {
+                                    Ok(m) => m,
+                                    Err(_) => {
+                                        match resolver.resolve_package_fresh(name, range).await {
+                                            Ok(m) => m,
+                                            Err(e) => {
+                                                if log {
+                                                    eprintln!("  Warning: Could not resolve {} (range {}): {}", name, range, e);
+                                                }
+                                                pb.inc(1);
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if log {
+                                eprintln!("  Warning: Could not get available versions for {}: {}", name, e);
+                            }
+                            pb.inc(1);
+                            continue;
+                        }
                     }
-                    pb.inc(1);
-                    continue;
+                } else {
+                    // Current version cannot be parsed, fallback to latest
+                    match resolver.resolve_package_fresh(name, "latest").await {
+                        Ok(m) => m,
+                        Err(e) => {
+                            if log {
+                                eprintln!("  Warning: Could not resolve latest version for {}: {}", name, e);
+                            }
+                            pb.inc(1);
+                            continue;
+                        }
+                    }
                 }
             }
-        } else {
-            match resolver.resolve_package_fresh(name, range).await {
-                Ok(m) => m,
-                Err(e) => {
-                    if log {
-                        eprintln!("  Warning: Could not resolve {}: {}", name, e);
+            _ => {
+                // By default (major, latest or None), upgrade to the absolute latest version
+                match resolver.resolve_package_fresh(name, "latest").await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        if log {
+                            eprintln!("  Warning: Could not resolve latest version for {}: {}", name, e);
+                        }
+                        pb.inc(1);
+                        continue;
                     }
-                    pb.inc(1);
-                    continue;
                 }
             }
         };
@@ -254,16 +338,23 @@ pub async fn execute(
             .and_then(|v| v.as_object_mut())
         {
             if deps.contains_key(&candidate.name) {
-                let new_range = if latest {
-                    // In --latest mode, pin to the exact new version with caret
-                    format!("^{}", candidate.latest_version)
+                let new_range = if fixed {
+                    candidate.latest_version.clone()
                 } else {
-                    // Preserve original range style, update the version
                     let original = deps
                         .get(&candidate.name)
                         .and_then(|v| v.as_str())
                         .unwrap_or("latest");
-                    update_range_version(original, &candidate.latest_version)
+                    let trimmed = original.trim();
+                    let prefix_end = trimmed
+                        .find(|c: char| c.is_ascii_digit())
+                        .unwrap_or(0);
+                    let prefix = &trimmed[..prefix_end];
+                    if prefix.is_empty() {
+                        candidate.latest_version.clone()
+                    } else {
+                        update_range_version(original, &candidate.latest_version)
+                    }
                 };
                 deps.insert(
                     candidate.name.clone(),
@@ -281,6 +372,7 @@ pub async fn execute(
         upgradable.len(),
         config_path.file_name().unwrap().to_string_lossy()
     );
+
 
     // Re-resolve and reinstall by collecting all deps from the updated config
     println!("Resolving and installing updated dependencies...\n");
