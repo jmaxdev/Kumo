@@ -206,60 +206,106 @@ impl Resolver {
         let _ = std::fs::create_dir_all(&cache_dir);
         let cache_path = cache_dir.join(format!("{}.json", name.replace('/', "__")));
 
-        let response: RegistryResponse = if cache_path.exists() {
+        let mut from_cache = false;
+        let mut response: RegistryResponse = if cache_path.exists() {
             let content = std::fs::read_to_string(&cache_path)?;
-            let res: RegistryResponse = serde_json::from_str(&content)?;
-            if res.versions.is_empty() {
-                self.fetch_and_cache_metadata(name, &cache_path).await?
+            if let Ok(res) = serde_json::from_str::<RegistryResponse>(&content) {
+                if res.versions.is_empty() {
+                    self.fetch_and_cache_metadata(name, &cache_path).await?
+                } else {
+                    from_cache = true;
+                    res
+                }
             } else {
-                res
+                self.fetch_and_cache_metadata(name, &cache_path).await?
             }
         } else {
             self.fetch_and_cache_metadata(name, &cache_path).await?
         };
 
-        let version_str = if response.dist_tags.contains_key(range) {
-            response
-                .dist_tags
-                .get(range)
-                .unwrap()
-                .to_string()
-        } else if range == "latest" || range == "*" || range == "" {
-            response
-                .dist_tags
-                .get("latest")
-                .ok_or_else(|| anyhow!("No latest tag found for {}", name))?
-                .to_string()
-        } else {
-            let reqs: Vec<VersionReq> = range
-                .split("||")
-                .map(|r| {
-                    let normalized = r
-                        .trim()
-                        .replace(">= ", ">=")
-                        .replace("<= ", "<=")
-                        .replace("> ", ">")
-                        .replace("< ", "<")
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    VersionReq::parse(&normalized)
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| anyhow!("Invalid semver range: {}", range))?;
+        // We wrap the resolution in a loop (up to 2 attempts) to handle stale cache refresh
+        let mut attempts = 0;
+        let version_str = loop {
+            attempts += 1;
 
-            let mut versions: Vec<Version> = response
-                .versions
-                .keys()
-                .filter_map(|v| Version::parse(v).ok())
-                .filter(|v| reqs.iter().any(|req| req.matches(v)))
-                .collect();
+            let resolved = if response.dist_tags.contains_key(range) {
+                Some(response.dist_tags.get(range).unwrap().to_string())
+            } else if range == "latest" || range == "*" || range == "" {
+                response.dist_tags.get("latest").cloned()
+            } else {
+                let parsed_reqs = range
+                    .split("||")
+                    .map(|r| {
+                        let normalized = r
+                            .trim()
+                            .replace(">= ", ">=")
+                            .replace("<= ", "<=")
+                            .replace("> ", ">")
+                            .replace("< ", "<")
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        VersionReq::parse(&normalized)
+                    })
+                    .collect::<Result<Vec<_>, _>>();
 
-            versions.sort();
-            versions
-                .last()
-                .map(|v| v.to_string())
-                .ok_or_else(|| anyhow!("No version matching {} found for {}", range, name))?
+                match parsed_reqs {
+                    Ok(reqs) => {
+                        let mut versions: Vec<Version> = response
+                            .versions
+                            .keys()
+                            .filter_map(|v| Version::parse(v).ok())
+                            .filter(|v| reqs.iter().any(|req| req.matches(v)))
+                            .collect();
+                        versions.sort();
+                        versions.last().map(|v| v.to_string())
+                    }
+                    Err(_) => None,
+                }
+            };
+
+            if let Some(v_str) = resolved {
+                if response.versions.contains_key(&v_str) {
+                    break v_str;
+                }
+            }
+
+            // If we couldn't resolve or find version data, and we used cache, refresh cache and retry
+            if from_cache && attempts < 2 {
+                response = self.fetch_and_cache_metadata(name, &cache_path).await?;
+                from_cache = false;
+            } else {
+                // If it fails after fresh fetch (or we didn't use cache), return the appropriate error
+                let reqs_res = range
+                    .split("||")
+                    .map(|r| {
+                        let normalized = r
+                            .trim()
+                            .replace(">= ", ">=")
+                            .replace("<= ", "<=")
+                            .replace("> ", ">")
+                            .replace("< ", "<")
+                            .split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        VersionReq::parse(&normalized)
+                    })
+                    .collect::<Result<Vec<_>, _>>();
+                
+                if reqs_res.is_err() {
+                    anyhow::bail!("Invalid semver range: {}", range);
+                }
+
+                if response.dist_tags.contains_key(range) {
+                    let v_str = response.dist_tags.get(range).unwrap();
+                    anyhow::bail!("Version data for {} not found (resolved from tag {})", v_str, range);
+                } else if range == "latest" || range == "*" || range == "" {
+                    let v_str = response.dist_tags.get("latest").ok_or_else(|| anyhow!("No latest tag found for {}", name))?;
+                    anyhow::bail!("Version data for {} not found (resolved from latest tag)", v_str);
+                } else {
+                    anyhow::bail!("No version matching {} found for {}", range, name);
+                }
+            }
         };
 
         let version_data = response
