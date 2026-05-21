@@ -104,30 +104,43 @@ async function run() {
 
   try {
     const { execSync } = require('child_process');
-    console.log('Committing and tagging...');
+    console.log('Committing version bump...');
 
     const isPreRelease = newVersion.includes('-');
     const targetBranch = isPreRelease ? 'dev' : 'master';
 
     execSync('git add .');
     execSync(`git commit -m "release: v${newVersion}"`);
-    execSync(`git tag v${newVersion}`);
+
+    console.log(`Pulling latest changes from origin/${targetBranch} with rebase...`);
+    execSync(`git pull --rebase origin ${targetBranch}`);
+
+    console.log(`Tagging v${newVersion}...`);
+    execSync(`git tag -f v${newVersion}`);
 
     console.log(`Pushing changes and tag v${newVersion} to origin/\x1b[35m${targetBranch}\x1b[0m...`);
     // Push the current HEAD to the target branch
     execSync(`git push origin HEAD:${targetBranch}`);
 
-    execSync(`git push origin v${newVersion}`);
+    // Push the tag
+    execSync(`git push origin v${newVersion} --force`);
+
     if (targetBranch === "master") {
       // push dev too, because it's importante maintain the dev branch updated.
-      execSync(`git push origin dev`);
-      console.log(`Pushed changes to dev branch.`);
+      console.log('Updating dev branch...');
+      try {
+        execSync(`git push origin dev`);
+        console.log(`Pushed changes to dev branch.`);
+      } catch (devError) {
+        console.warn('Failed to push to dev branch, you may need to sync it manually:', devError.message);
+      }
     }
 
     console.log(`\n\x1b[32mSuccessfully released v${newVersion}!\x1b[0m`);
     console.log(`Code pushed to \x1b[35m${targetBranch}\x1b[0m branch.`);
     console.log('GitHub Actions will now build the artifacts.');
   } catch (error) {
+    console.error('Detailed error log:', error);
     console.warn('\x1b[31mGit operations failed.\x1b[0m Please make sure you have git installed and are in a git repository.');
     console.log(`Manual steps needed:\n   git commit -am "release: v${newVersion}"\n   git tag v${newVersion}\n   git push origin v${newVersion}`);
   }
