@@ -1,6 +1,6 @@
 [package]
 name = "resolver"
-version = "0.2.10-alpha.3"
+version = "0.2.10-alpha.4"
 edition = "2021"
 
 [dependencies]
